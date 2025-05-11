@@ -87,5 +87,5 @@ $logdir = "$env:localappdata\winutil\logs"
 Start-Transcript -Path "$logdir\winutil_$dateTime.log" -Append -NoClobber | Out-Null
 
 # Set PowerShell window title
-$Host.UI.RawUI.WindowTitle = $myInvocation.MyCommand.Definition + "(Admin)"
-clear-host
+# $Host.UI.RawUI.WindowTitle = $myInvocation.MyCommand.Definition + "(Admin)"
+# clear-host

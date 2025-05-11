@@ -327,6 +327,177 @@ $sync["Form"].Add_Deactivated({
     Invoke-WPFPopup -Action "Hide" -Popups @("Settings", "Theme")
 })
 
+function updateProgrss {
+    param(
+        $activity,
+        $totalItems,
+        $currentItem,
+        $status
+    )
+
+    $percentComplete = ($currentItem / $totalItems) * 100
+    $barWidth = 20  # Width of the progress bar in characters
+
+    $filled = [int]($percentComplete / (100 / $barWidth))
+    $progressBar = "[" + ("=" * $Filled) + (" " * ($barWidth - $filled)) + "]"
+
+    # Make sure the current item always has same width
+    $itemWidth = [string] $totalItems
+    $itemWidth = $itemWidth.Length
+    $paddedCurrentItem = $currentItem.ToString().PadLeft($itemWidth)
+
+    Write-Host "`r" -NoNewline
+    Write-Host -NoNewline `
+        "$($activity)$($ProgressBar) $($paddedCurrentItem)\$($totalItems) $($status)`r"
+}
+
+
+function printProgrss {
+    param(
+        $activity,
+        $totalItems,
+        $currentItem,
+        $status
+    )
+
+    $itemWidth = [string] $totalItems
+    $itemWidth = $itemWidth.Length
+    $paddedCurrentItem = $currentItem.ToString().PadLeft($itemWidth)
+
+    Write-Host "`r" -NoNewline
+    Write-Host -NoNewline `
+        "$($activity)$($paddedCurrentItem)\$($totalItems) $($status)`r"
+}
+
+function Write-Banner {
+    param (
+        [string]$Text
+    )
+
+    $maxLength = 43
+    $textLength = $Text.Length
+
+    $paddingLength = $maxLength - $textLength - 4
+
+    # # If the text is too long, truncate it (optional, but avoids banner overflow)
+    # if ($paddingLength -lt 0) {
+    #     $Text = $Text.Substring(0, $maxLength - 5) + "..." # -5 for "... "
+    #     $textLength = $Text.Length
+    #     $paddingLength = $maxLength - $textLength - 2
+    # }
+    
+    # Calculate left padding to center the text
+    $leftPaddingLength = [int]($paddingLength / 2)
+    $rightPaddingLength = $paddingLength - $leftPaddingLength
+
+    # Create padding strings
+    $leftPadding = " " * $leftPaddingLength
+    $rightPadding = " " * $rightPaddingLength
+
+    # Build the banner
+    Write-Host
+    Write-Host "==========================================="
+    Write-Host "--$leftPadding$Text$rightPadding--"
+    Write-Host "==========================================="
+    Write-Host
+}
+
+function InstallTweaks {
+    # take the list of tweaks from the json, and pass it one by one to this
+    Write-Host "Installing tweaks"
+    Write-Host
+    $Tweaks = (Get-WinUtilCheckBoxes)["WPFTweaks"]
+
+    for ($i = 0; $i -lt $Tweaks.Count; $i++) {
+        Set-WinUtilProgressBar `
+            -Label "Applying $($tweaks[$i])" `
+            -Percent ($i / $tweaks.Count * 100)
+
+        Write-Progress `
+            -Activity "Processing items" `
+            -Status "Processing item $($i) of $($TotalItems)" `
+            -PercentComplete $PercentComplete
+
+        updateProgrss "" $tweaks.Count $i "Applying $($tweaks[$i])"
+
+        Invoke-WinUtilTweaks $tweaks[$i]
+    }
+    Write-Host 
+}
+
+
+function InstallFeatures {
+    $Features = (Get-WinUtilCheckBoxes)["WPFFeature"]
+    # Invoke-WinUtilFeatureInstall $Features
+    $Features | ForEach-Object {
+        if($sync.configs.feature.$psitem.feature) {
+            Foreach( $feature in $sync.configs.feature.$psitem.feature ) {
+                try {
+                    Write-Host "Installing $feature"
+                    Enable-WindowsOptionalFeature -Online -FeatureName $feature -All -NoRestart
+                } catch {
+                    if ($psitem.Exception.Message -like "*requires elevation*") {
+                        Write-Warning "Unable to Install $feature due to permissions. Are you running as admin?"
+                    } else {
+
+                        Write-Warning "Unable to Install $feature due to unhandled exception"
+                        Write-Warning $psitem.Exception.StackTrace
+                    }
+                }
+            }
+        }
+        if($sync.configs.feature.$psitem.InvokeScript) {
+            Foreach( $script in $sync.configs.feature.$psitem.InvokeScript ) {
+                try {
+                    $Scriptblock = [scriptblock]::Create($script)
+
+                    Write-Host "Running Script for $psitem"
+                    Invoke-Command $scriptblock -ErrorAction stop
+                } catch {
+                    if ($psitem.Exception.Message -like "*requires elevation*") {
+                        Write-Warning "Unable to Install $feature due to permissions. Are you running as admin?"
+                    } else {
+                        Write-Warning "Unable to Install $feature due to unhandled exception"
+                        Write-Warning $psitem.Exception.StackTrace
+                    }
+                }
+            }
+        }
+    }
+}
+
+function InstallApps {
+    # Invoke-WPFInstall
+    $ManagerPreference = $sync["ManagerPreference"]
+
+    $packagesSorted = Get-WinUtilSelectedPackages `
+        -PackageList $PackagesToInstall `
+        -Preference $ManagerPreference
+
+    $packagesWinget = $packagesSorted[[PackageManagers]::Winget]
+    $packagesChoco = $packagesSorted[[PackageManagers]::Choco]
+
+    # always install these
+    Install-WinUtilWinget
+    Install-WinUtilChoco
+
+    try {
+        $errorPackages = @()
+        if($packagesWinget.Count -gt 0) {
+            Install-WinUtilProgramWinget -Action Install -Programs $packagesWinget
+
+        }
+        if($packagesChoco.Count -gt 0) {
+            Install-WinUtilProgramChoco -Action Install -Programs $packagesChoco
+        }
+        Write-Banner "Installs have finished"
+    } catch {
+        Write-Error $_
+    }
+
+
+}
+
 $sync["Form"].Add_ContentRendered({
     # Load the Windows Forms assembly
     Add-Type -AssemblyName System.Windows.Forms
@@ -363,33 +534,55 @@ $sync["Form"].Add_ContentRendered({
     if ($PARAM_CONFIG) {
         Invoke-WPFImpex -type "import" -Config $PARAM_CONFIG
         if ($PARAM_RUN) {
-            while ($sync.ProcessRunning) {
-                Start-Sleep -Seconds 5
-            }
-            Start-Sleep -Seconds 5
+            [console]::CursorVisible = $false
 
-            Write-Host "Applying tweaks..."
-            Invoke-WPFtweaksbutton
-            while ($sync.ProcessRunning) {
-                Start-Sleep -Seconds 5
-            }
-            Start-Sleep -Seconds 5
-
-            Write-Host "Installing features..."
-            Invoke-WPFFeatureInstall
-            while ($sync.ProcessRunning) {
-                Start-Sleep -Seconds 5
+            $TotalItems = 100
+            for ($i = 1; $i -le $TotalItems; $i++) {
+                updateProgrss "" $totalItems $i Hi
+                Start-Sleep -Milliseconds 100
             }
 
-            Start-Sleep -Seconds 5
-            Write-Host "Installing applications..."
-            while ($sync.ProcessRunning) {
-                Start-Sleep -Seconds 1
-            }
-            Invoke-WPFInstall
-            Start-Sleep -Seconds 5
+            InstallTweaks
+
+            InstallFeatures
+
+            InstallApps
+
+            [console]::CursorVisible = $true
 
             Write-Host "Done."
+
+            # while ($sync.ProcessRunning) {
+            #     Start-Sleep -Seconds 5
+            #     Write-Host "..."
+            # }
+            # Start-Sleep -Seconds 5
+            #
+            # Write-Host "Applying tweaks..."
+            # Invoke-WPFtweaksbutton
+            # while ($sync.ProcessRunning) {
+            #     Start-Sleep -Seconds 5
+            #     Write-Host "..."
+            # }
+            # Start-Sleep -Seconds 5
+            #
+            # Write-Host "Installing features..."
+            # Invoke-WPFFeatureInstall
+            # while ($sync.ProcessRunning) {
+            #     Start-Sleep -Seconds 5
+            #     Write-Host "..."
+            # }
+            #
+            # Start-Sleep -Seconds 5
+            # Write-Host "Installing applications..."
+            # while ($sync.ProcessRunning) {
+            #     Start-Sleep -Seconds 1
+            #     Write-Host "..."
+            # }
+            # Invoke-WPFInstall
+            # Start-Sleep -Seconds 5
+            #
+            # Write-Host "Done."
         }
     }
 
